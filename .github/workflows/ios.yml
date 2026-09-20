@@ -1,0 +1,297 @@
+name: Build Unsigned iOS IPA (With Custom Icon)
+
+on:
+  push:
+    branches: ["main", "master"]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    name: Build Unsigned IPA
+    runs-on: macos-14
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Xcode
+        run: |
+          sudo xcode-select -s /Applications/Xcode_15.0.app
+
+      - name: Generate iOS Project with Custom Icon
+        run: |
+          set -euo pipefail
+          echo "🛠️ Generating iOS project with custom icon..."
+          
+          # بررسی وجود فایل آیکون
+          if [ ! -f "yaraniha.png" ]; then
+            echo "❌ ERROR: yaraniha.png not found in repository root!"
+            exit 1
+          fi
+          
+          echo "✅ Found yaraniha.png:"
+          file yaraniha.png
+          
+          mkdir -p ios/YaranAmooz
+          mkdir -p ios/YaranAmooz.xcodeproj
+          mkdir -p ios/YaranAmooz/Assets.xcassets/AppIcon.appiconset
+          
+          # 1. تبدیل آیکون به اندازه‌های استاندارد iOS
+          echo "🎨 Generating app icons in different sizes..."
+          
+          # کپی آیکون اصلی با اندازه‌های مختلف
+          sips -z 40 40 yaraniha.png --out ios/YaranAmooz/Assets.xcassets/AppIcon.appiconset/icon-40.png > /dev/null 2>&1
+          sips -z 60 60 yaraniha.png --out ios/YaranAmooz/Assets.xcassets/AppIcon.appiconset/icon-60.png > /dev/null 2>&1
+          sips -z 58 58 yaraniha.png --out ios/YaranAmooz/Assets.xcassets/AppIcon.appiconset/icon-58.png > /dev/null 2>&1
+          sips -z 87 87 yaraniha.png --out ios/YaranAmooz/Assets.xcassets/AppIcon.appiconset/icon-87.png > /dev/null 2>&1
+          sips -z 80 80 yaraniha.png --out ios/YaranAmooz/Assets.xcassets/AppIcon.appiconset/icon-80.png > /dev/null 2>&1
+          sips -z 120 120 yaraniha.png --out ios/YaranAmooz/Assets.xcassets/AppIcon.appiconset/icon-120.png > /dev/null 2>&1
+          sips -z 180 180 yaraniha.png --out ios/YaranAmooz/Assets.xcassets/AppIcon.appiconset/icon-180.png > /dev/null 2>&1
+          sips -z 1024 1024 yaraniha.png --out ios/YaranAmooz/Assets.xcassets/AppIcon.appiconset/icon-1024.png > /dev/null 2>&1
+          
+          echo "✅ Generated all icon sizes"
+          
+          # 2. ساخت فایل Contents.json برای AppIcon
+          cat > ios/YaranAmooz/Assets.xcassets/AppIcon.appiconset/Contents.json <<'EOF'
+          {
+            "images" : [
+              {
+                "size" : "20x20",
+                "idiom" : "iphone",
+                "filename" : "icon-40.png",
+                "scale" : "2x"
+              },
+              {
+                "size" : "20x20",
+                "idiom" : "iphone",
+                "filename" : "icon-60.png",
+                "scale" : "3x"
+              },
+              {
+                "size" : "29x29",
+                "idiom" : "iphone",
+                "filename" : "icon-58.png",
+                "scale" : "2x"
+              },
+              {
+                "size" : "29x29",
+                "idiom" : "iphone",
+                "filename" : "icon-87.png",
+                "scale" : "3x"
+              },
+              {
+                "size" : "40x40",
+                "idiom" : "iphone",
+                "filename" : "icon-80.png",
+                "scale" : "2x"
+              },
+              {
+                "size" : "40x40",
+                "idiom" : "iphone",
+                "filename" : "icon-120.png",
+                "scale" : "3x"
+              },
+              {
+                "size" : "60x60",
+                "idiom" : "iphone",
+                "filename" : "icon-120.png",
+                "scale" : "2x"
+              },
+              {
+                "size" : "60x60",
+                "idiom" : "iphone",
+                "filename" : "icon-180.png",
+                "scale" : "3x"
+              },
+              {
+                "size" : "1024x1024",
+                "idiom" : "ios-marketing",
+                "filename" : "icon-1024.png",
+                "scale" : "1x"
+              }
+            ],
+            "info" : {
+              "version" : 1,
+              "author" : "xcode"
+            }
+          }
+          EOF
+          
+          # 3. ساخت فایل Contents.json برای Assets.xcassets
+          cat > ios/YaranAmooz/Assets.xcassets/Contents.json <<'EOF'
+          {
+            "info" : {
+              "version" : 1,
+              "author" : "xcode"
+            }
+          }
+          EOF
+          
+          # 4. ساخت فایل Info.plist
+          cat > ios/YaranAmooz/Info.plist <<'EOF'
+          <?xml version="1.0" encoding="UTF-8"?>
+          <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+          <plist version="1.0">
+          <dict>
+              <key>CFBundleDevelopmentRegion</key>
+              <string>en</string>
+              <key>CFBundleExecutable</key>
+              <string>$(EXECUTABLE_NAME)</string>
+              <key>CFBundleIdentifier</key>
+              <string>com.yaranamooz.app</string>
+              <key>CFBundleInfoDictionaryVersion</key>
+              <string>6.0</string>
+              <key>CFBundleName</key>
+              <string>Yaran Amooz</string>
+              <key>CFBundlePackageType</key>
+              <string>APPL</string>
+              <key>CFBundleShortVersionString</key>
+              <string>1.0</string>
+              <key>CFBundleVersion</key>
+              <string>1</string>
+              <key>LSRequiresIPhoneOS</key>
+              <true/>
+              <key>UIRequiredDeviceCapabilities</key>
+              <array>
+                  <string>armv7</string>
+              </array>
+              <key>UISupportedInterfaceOrientations</key>
+              <array>
+                  <string>UIInterfaceOrientationPortrait</string>
+                  <string>UIInterfaceOrientationLandscapeLeft</string>
+                  <string>UIInterfaceOrientationLandscapeRight</string>
+              </array>
+              <key>NSAppTransportSecurity</key>
+              <dict>
+                  <key>NSAllowsArbitraryLoads</key>
+                  <true/>
+              </dict>
+          </dict>
+          </plist>
+          EOF
+
+          # 5. ساخت فایل AppDelegate.swift
+          cat > ios/YaranAmooz/AppDelegate.swift <<'EOF'
+          import UIKit
+
+          @main
+          class AppDelegate: UIResponder, UIApplicationDelegate {
+              var window: UIWindow?
+
+              func application(_ application: UIApplication, didFinishLaunchingWithOptions launchOptions: [UIApplication.LaunchOptionsKey: Any]?) -> Bool {
+                  window = UIWindow(frame: UIScreen.main.bounds)
+                  let viewController = ViewController()
+                  window?.rootViewController = viewController
+                  window?.makeKeyAndVisible()
+                  return true
+              }
+          }
+          EOF
+
+          # 6. ساخت فایل ViewController.swift (شامل WKWebView)
+          cat > ios/YaranAmooz/ViewController.swift <<'EOF'
+          import UIKit
+          import WebKit
+
+          class ViewController: UIViewController, WKNavigationDelegate {
+              var webView: WKWebView!
+
+              override func loadView() {
+                  let webConfiguration = WKWebViewConfiguration()
+                  webView = WKWebView(frame: .zero, configuration: webConfiguration)
+                  webView.navigationDelegate = self
+                  view = webView
+              }
+
+              override func viewDidLoad() {
+                  super.viewDidLoad()
+                  if let url = URL(string: "https://app.yaranamooz.ir") {
+                      let request = URLRequest(url: url)
+                      webView.load(request)
+                  }
+              }
+          }
+          EOF
+
+          # 7. ساخت فایل project.pbxproj (با Assets.xcassets)
+          cat > ios/YaranAmooz.xcodeproj/project.pbxproj <<'EOF'
+          // !$*UTF8*$!
+          {
+              archiveVersion = 1;
+              classes = {
+              };
+              objectVersion = 56;
+              objects = {
+                  A10000010000000000000001 /* AppDelegate.swift in Sources */ = {isa = PBXBuildFile; fileRef = A20000010000000000000001; };
+                  A10000020000000000000002 /* ViewController.swift in Sources */ = {isa = PBXBuildFile; fileRef = A20000020000000000000002; };
+                  A10000030000000000000003 /* Assets.xcassets in Resources */ = {isa = PBXBuildFile; fileRef = A20000030000000000000003; };
+                  A20000010000000000000001 /* AppDelegate.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AppDelegate.swift; sourceTree = "<group>"; };
+                  A20000020000000000000002 /* ViewController.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ViewController.swift; sourceTree = "<group>"; };
+                  A20000030000000000000003 /* Assets.xcassets */ = {isa = PBXFileReference; lastKnownFileType = folder.assetcatalog; path = Assets.xcassets; sourceTree = "<group>"; };
+                  A20000040000000000000004 /* Info.plist */ = {isa = PBXFileReference; lastKnownFileType = text.plist.xml; path = Info.plist; sourceTree = "<group>"; };
+                  A30000010000000000000001 /* YaranAmooz.app */ = {isa = PBXFileReference; explicitFileType = wrapper.application; includeInIndex = 0; path = YaranAmooz.app; sourceTree = BUILT_PRODUCTS_DIR; };
+                  A50000010000000000000001 = {isa = PBXGroup; children = (A50000020000000000000002,); sourceTree = "<group>"; };
+                  A50000020000000000000002 /* YaranAmooz */ = {isa = PBXGroup; children = (A20000010000000000000001, A20000020000000000000002, A20000030000000000000003, A20000040000000000000004); path = YaranAmooz; sourceTree = "<group>"; };
+                  A40000010000000000000001 /* Frameworks */ = {isa = PBXFrameworksBuildPhase; buildActionMask = 2147483647; files = (); runOnlyForDeploymentPostprocessing = 0; };
+                  A60000010000000000000001 /* YaranAmooz */ = {isa = PBXNativeTarget; buildConfigurationList = A80000010000000000000001; buildPhases = (A40000010000000000000001, A70000010000000000000001, A70000020000000000000002); dependencies = (); name = YaranAmooz; productName = YaranAmooz; productReference = A30000010000000000000001; productType = "com.apple.product-type.application"; };
+                  A90000010000000000000001 /* Project object */ = {isa = PBXProject; attributes = {BuildIndependentTargetsInParallel = 1; LastSwiftUpdateCheck = 1500; LastUpgradeCheck = 1500; TargetAttributes = {A60000010000000000000001 = {CreatedOnToolsVersion = 15.0; }; }; }; buildConfigurationList = A80000020000000000000002; compatibilityVersion = "Xcode 14.0"; developmentRegion = en; hasScannedForEncodings = 0; knownRegions = (en, Base); mainGroup = A50000010000000000000001; productRefGroup = A50000030000000000000003; projectDirPath = ""; projectRoot = ""; targets = (A60000010000000000000001,); };
+                  A70000010000000000000001 /* Sources */ = {isa = PBXSourcesBuildPhase; buildActionMask = 2147483647; files = (A10000010000000000000001, A10000020000000000000002); runOnlyForDeploymentPostprocessing = 0; };
+                  A70000020000000000000002 /* Resources */ = {isa = PBXResourcesBuildPhase; buildActionMask = 2147483647; files = (A10000030000000000000003); runOnlyForDeploymentPostprocessing = 0; };
+                  A80000030000000000000003 /* Debug */ = {isa = XCBuildConfiguration; buildSettings = {ALWAYS_SEARCH_USER_PATHS = NO; CLANG_ENABLE_MODULES = YES; CLANG_ENABLE_OBJC_ARC = YES; CODE_SIGNING_ALLOWED = NO; CODE_SIGNING_REQUIRED = NO; GCC_PREPROCESSOR_DEFINITIONS = ("DEBUG=1", "$(inherited)"); IPHONEOS_DEPLOYMENT_TARGET = 15.0; SDKROOT = iphoneos; SWIFT_VERSION = 5.0; }; name = Debug; };
+                  A80000040000000000000004 /* Release */ = {isa = XCBuildConfiguration; buildSettings = {ALWAYS_SEARCH_USER_PATHS = NO; CLANG_ENABLE_MODULES = YES; CLANG_ENABLE_OBJC_ARC = YES; CODE_SIGNING_ALLOWED = NO; CODE_SIGNING_REQUIRED = NO; IPHONEOS_DEPLOYMENT_TARGET = 15.0; SDKROOT = iphoneos; SWIFT_VERSION = 5.0; }; name = Release; };
+                  A80000050000000000000005 /* Debug */ = {isa = XCBuildConfiguration; buildSettings = {ASSETCATALOG_COMPILER_APPICON_NAME = AppIcon; CODE_SIGN_STYLE = Manual; CURRENT_PROJECT_VERSION = 1; DEVELOPMENT_TEAM = ""; INFOPLIST_FILE = YaranAmooz/Info.plist; LD_RUNPATH_SEARCH_PATHS = ("$(inherited)", "@executable_path/Frameworks"); MARKETING_VERSION = 1.0; PRODUCT_BUNDLE_IDENTIFIER = com.yaranamooz.app; PRODUCT_NAME = "$(TARGET_NAME)"; TARGETED_DEVICE_FAMILY = "1,2"; }; name = Debug; };
+                  A80000060000000000000006 /* Release */ = {isa = XCBuildConfiguration; buildSettings = {ASSETCATALOG_COMPILER_APPICON_NAME = AppIcon; CODE_SIGN_STYLE = Manual; CURRENT_PROJECT_VERSION = 1; DEVELOPMENT_TEAM = ""; INFOPLIST_FILE = YaranAmooz/Info.plist; LD_RUNPATH_SEARCH_PATHS = ("$(inherited)", "@executable_path/Frameworks"); MARKETING_VERSION = 1.0; PRODUCT_BUNDLE_IDENTIFIER = com.yaranamooz.app; PRODUCT_NAME = "$(TARGET_NAME)"; TARGETED_DEVICE_FAMILY = "1,2"; }; name = Release; };
+                  A80000010000000000000001 = {isa = XCConfigurationList; buildConfigurations = (A80000050000000000000005, A80000060000000000000006); defaultConfigurationIsVisible = 0; defaultConfigurationName = Release; };
+                  A80000020000000000000002 = {isa = XCConfigurationList; buildConfigurations = (A80000030000000000000003, A80000040000000000000004); defaultConfigurationIsVisible = 0; defaultConfigurationName = Release; };
+              };
+              rootObject = A90000010000000000000001;
+          }
+          EOF
+          
+          echo "✅ iOS project with custom icon generated successfully."
+
+      - name: Build Archive (Without Code Signing)
+        run: |
+          xcodebuild archive \
+            -project ios/YaranAmooz.xcodeproj \
+            -scheme YaranAmooz \
+            -sdk iphoneos \
+            -archivePath build/YaranAmooz.xcarchive \
+            CODE_SIGNING_ALLOWED=NO \
+            CODE_SIGNING_REQUIRED=NO \
+            CODE_SIGN_IDENTITY="" \
+            GCC_TREAT_WARNINGS_AS_ERRORS=NO
+
+      - name: Manually Package IPA
+        run: |
+          # ساختار فایل IPA فقط یک پوشه Payload است که شامل فایل .app می‌شود
+          mkdir -p build/Payload
+          
+          # کپی کردن فایل اپلیکیشن از داخل آرشیو به پوشه Payload
+          cp -R build/YaranAmooz.xcarchive/Products/Applications/YaranAmooz.app build/Payload/
+          
+          # فشرده‌سازی به فرمت IPA
+          cd build
+          zip -r YaranAmooz-Unsigned.ipa Payload/
+          
+          echo "✅ فایل IPA با موفقیت ساخته شد."
+
+      - name: Verify IPA
+        run: |
+          if [ -f "build/YaranAmooz-Unsigned.ipa" ]; then
+            echo "✅ فایل IPA وجود دارد:"
+            ls -lh build/YaranAmooz-Unsigned.ipa
+          else
+            echo "❌ فایل IPA ساخته نشد!"
+            exit 1
+          fi
+
+      - name: Upload Unsigned IPA
+        uses: actions/upload-artifact@v4
+        with:
+          name: yaran-amooz-unsigned-ipa
+          path: build/YaranAmooz-Unsigned.ipa
+          retention-days: 30
