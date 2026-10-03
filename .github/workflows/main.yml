@@ -16,6 +16,7 @@ jobs:
   build:
     name: Build signed Multi-ABI APKs
     runs-on: ubuntu-24.04
+    timeout-minutes: 45
 
     env:
       ANDROID_HOME: /usr/local/lib/android/sdk
@@ -36,19 +37,17 @@ jobs:
 
           IMAGE="yaraniha.png"
 
-          if [ ! -f "$IMAGE" ]; then
-            echo "ERROR: $IMAGE was not found in repository root."
-            echo "Add the image to the repository root with the exact filename: yaraniha.png"
-            exit 1
-          fi
-
           if [ ! -s "$IMAGE" ]; then
-            echo "ERROR: $IMAGE exists but is empty."
+            echo "ERROR: $IMAGE is missing or empty in repository root."
             exit 1
           fi
 
-          file "$IMAGE"
-          ls -lh "$IMAGE"
+          INFO="$(file "$IMAGE")"
+          echo "$INFO"
+          case "$INFO" in
+            *"PNG image data"*) ;;
+            *) echo "ERROR: $IMAGE is not a valid PNG."; exit 1 ;;
+          esac
 
       - name: Set up JDK 17
         uses: actions/setup-java@v5
@@ -88,25 +87,12 @@ jobs:
 
           KEYSTORE_FILE="$GITHUB_WORKSPACE/yaraniha.keystore"
 
-          if [ -z "${KEYSTORE_BASE64:-}" ]; then
-            echo "ERROR: ANDROID_KEYSTORE_BASE64 secret is missing."
-            exit 1
-          fi
-
-          if [ -z "${KEYSTORE_PASSWORD:-}" ]; then
-            echo "ERROR: ANDROID_KEYSTORE_PASSWORD secret is missing."
-            exit 1
-          fi
-
-          if [ -z "${KEY_ALIAS:-}" ]; then
-            echo "ERROR: ANDROID_KEY_ALIAS secret is missing."
-            exit 1
-          fi
-
-          if [ -z "${KEY_PASSWORD:-}" ]; then
-            echo "ERROR: ANDROID_KEY_PASSWORD secret is missing."
-            exit 1
-          fi
+          for v in KEYSTORE_BASE64 KEYSTORE_PASSWORD KEY_ALIAS KEY_PASSWORD; do
+            if [ -z "${!v:-}" ]; then
+              echo "ERROR: required signing secret is missing: $v"
+              exit 1
+            fi
+          done
 
           printf '%s' "$KEYSTORE_BASE64" | base64 --decode > "$KEYSTORE_FILE"
 
@@ -123,28 +109,25 @@ jobs:
 
           KEYSTORE_FILE="$GITHUB_WORKSPACE/yaraniha.keystore"
 
-          echo "Validating keystore and requested alias..."
-
-          keytool \
-            -list \
-            -keystore "$KEYSTORE_FILE" \
-            -storepass "$KEYSTORE_PASSWORD" \
-            -alias "$KEY_ALIAS" \
-            >/dev/null
-
-          keytool \
-            -list \
-            -v \
+          keytool -list -v \
             -keystore "$KEYSTORE_FILE" \
             -storepass "$KEYSTORE_PASSWORD" \
             -alias "$KEY_ALIAS" \
             > /tmp/signing-key.txt
 
-          echo "Signing alias:"
           grep -m1 '^Alias name:' /tmp/signing-key.txt || true
 
-          echo "Certificate fingerprints:"
-          grep -E 'SHA256:|SHA-256:' /tmp/signing-key.txt || true
+          FP="$(grep -m1 -E '^[[:space:]]*SHA256:' /tmp/signing-key.txt \
+            | sed -E 's/^[[:space:]]*SHA256:[[:space:]]*//' \
+            | tr -d ':[:space:]' | tr 'A-F' 'a-f' || true)"
+
+          if [ -z "$FP" ]; then
+            echo "ERROR: could not read SHA-256 fingerprint of the signing key."
+            exit 1
+          fi
+
+          echo "Expected signing certificate SHA-256: $FP"
+          echo "KEYSTORE_CERT_SHA256=$FP" >> "$GITHUB_ENV"
 
       - name: Generate Android project
         shell: bash
@@ -156,21 +139,31 @@ jobs:
           mkdir -p app/src/main/res/values
           mkdir -p app/src/main/res/values-night
           mkdir -p app/src/main/res/xml
-          mkdir -p app/src/main/res/drawable
-
-          # Use the real image from the repository.
-          cp -f yaraniha.png app/src/main/res/drawable/yaraniha.png
 
           # ---------------------------------------------------------------
-          # Real native marker libraries.
-          # These are compiled by the Android NDK so ABI splits are genuine
-          # ELF shared libraries, not fabricated ELF headers.
+          # Launcher icons: resize the repository image to every density
+          # (avoids shipping one huge PNG as the icon).
           # ---------------------------------------------------------------
-          mkdir -p app/src/main/jniLibs/arm64-v8a
-          mkdir -p app/src/main/jniLibs/armeabi-v7a
-          mkdir -p app/src/main/jniLibs/x86
-          mkdir -p app/src/main/jniLibs/x86_64
+          IM="$(command -v magick || command -v convert || true)"
+          if [ -z "$IM" ]; then
+            sudo apt-get update -qq
+            sudo apt-get install -y -qq imagemagick
+            IM="$(command -v magick || command -v convert)"
+          fi
 
+          for pair in mdpi:48 hdpi:72 xhdpi:96 xxhdpi:144 xxxhdpi:192; do
+            d="${pair%%:*}"
+            s="${pair##*:}"
+            mkdir -p "app/src/main/res/mipmap-$d"
+            "$IM" yaraniha.png -strip -resize "${s}x${s}" \
+              -background none -gravity center -extent "${s}x${s}" \
+              "app/src/main/res/mipmap-$d/ic_launcher.png"
+          done
+
+          # ---------------------------------------------------------------
+          # Real native marker libraries (compiled by the NDK) so every
+          # ABI split is a genuine per-ABI APK. 16 KB page-size compatible.
+          # ---------------------------------------------------------------
           cat > /tmp/yaraniha_abi_marker.c <<'EOF'
           __attribute__((visibility("default")))
           void yaraniha_abi_marker(void) {}
@@ -179,30 +172,22 @@ jobs:
           NDK="$ANDROID_HOME/ndk/27.0.12077973"
           TOOLCHAIN="$NDK/toolchains/llvm/prebuilt/linux-x86_64/bin"
 
-          "$TOOLCHAIN/aarch64-linux-android21-clang" \
-            -shared -fPIC -O2 \
-            /tmp/yaraniha_abi_marker.c \
-            -o app/src/main/jniLibs/arm64-v8a/libyaraniha_abi.so
+          declare -A TRIPLES=(
+            [arm64-v8a]=aarch64-linux-android
+            [armeabi-v7a]=armv7a-linux-androideabi
+            [x86]=i686-linux-android
+            [x86_64]=x86_64-linux-android
+          )
 
-          "$TOOLCHAIN/armv7a-linux-androideabi21-clang" \
-            -shared -fPIC -O2 \
-            /tmp/yaraniha_abi_marker.c \
-            -o app/src/main/jniLibs/armeabi-v7a/libyaraniha_abi.so
-
-          "$TOOLCHAIN/i686-linux-android21-clang" \
-            -shared -fPIC -O2 \
-            /tmp/yaraniha_abi_marker.c \
-            -o app/src/main/jniLibs/x86/libyaraniha_abi.so
-
-          "$TOOLCHAIN/x86_64-linux-android21-clang" \
-            -shared -fPIC -O2 \
-            /tmp/yaraniha_abi_marker.c \
-            -o app/src/main/jniLibs/x86_64/libyaraniha_abi.so
-
-          file app/src/main/jniLibs/arm64-v8a/libyaraniha_abi.so
-          file app/src/main/jniLibs/armeabi-v7a/libyaraniha_abi.so
-          file app/src/main/jniLibs/x86/libyaraniha_abi.so
-          file app/src/main/jniLibs/x86_64/libyaraniha_abi.so
+          for abi in "${!TRIPLES[@]}"; do
+            mkdir -p "app/src/main/jniLibs/$abi"
+            "$TOOLCHAIN/${TRIPLES[$abi]}23-clang" \
+              -shared -fPIC -O2 -s \
+              -Wl,-z,max-page-size=16384 -Wl,-z,noexecstack \
+              /tmp/yaraniha_abi_marker.c \
+              -o "app/src/main/jniLibs/$abi/libyaraniha_abi.so"
+            file "app/src/main/jniLibs/$abi/libyaraniha_abi.so"
+          done
 
           # ===============================================================
           # AndroidManifest.xml
@@ -214,6 +199,10 @@ jobs:
               <uses-permission android:name="android.permission.INTERNET" />
               <uses-permission android:name="android.permission.ACCESS_NETWORK_STATE" />
               <uses-permission android:name="android.permission.CAMERA" />
+              <uses-permission android:name="android.permission.RECORD_AUDIO" />
+              <uses-permission android:name="android.permission.MODIFY_AUDIO_SETTINGS" />
+              <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
+
               <uses-permission
                   android:name="android.permission.WRITE_EXTERNAL_STORAGE"
                   android:maxSdkVersion="28" />
@@ -226,10 +215,19 @@ jobs:
                   android:name="android.hardware.camera.autofocus"
                   android:required="false" />
 
+              <uses-feature
+                  android:name="android.hardware.microphone"
+                  android:required="false" />
+
+              <uses-feature
+                  android:name="android.hardware.touchscreen"
+                  android:required="false" />
+
               <application
                   android:allowBackup="false"
                   android:hardwareAccelerated="true"
-                  android:icon="@drawable/yaraniha"
+                  android:icon="@mipmap/ic_launcher"
+                  android:roundIcon="@mipmap/ic_launcher"
                   android:label="Yaraniha"
                   android:supportsRtl="true"
                   android:theme="@style/AppTheme"
@@ -238,11 +236,11 @@ jobs:
 
                   <activity
                       android:name=".MainActivity"
-                      android:screenOrientation="portrait"
-                      android:configChanges="orientation|screenSize|screenLayout|keyboardHidden|uiMode"
+                      android:configChanges="orientation|screenSize|smallestScreenSize|screenLayout|keyboard|keyboardHidden|navigation|uiMode|density|layoutDirection|fontScale|locale"
                       android:exported="true"
                       android:hardwareAccelerated="true"
                       android:launchMode="singleTask"
+                      android:screenOrientation="user"
                       android:windowSoftInputMode="adjustResize">
 
                       <intent-filter>
@@ -259,7 +257,6 @@ jobs:
 
           # ===============================================================
           # Network Security Config
-          # Needed for legacy HTTP image/CDN URLs used as WebView subresources.
           # ===============================================================
           cat > app/src/main/res/xml/network_security_config.xml <<'EOF'
           <?xml version="1.0" encoding="utf-8"?>
@@ -280,12 +277,16 @@ jobs:
           import android.app.DownloadManager
           import android.content.Context
           import android.content.Intent
+          import android.content.pm.ActivityInfo
           import android.content.pm.PackageManager
+          import android.database.ContentObserver
           import android.net.Uri
           import android.os.Build
           import android.os.Bundle
           import android.os.Environment
-          import android.view.View
+          import android.os.Handler
+          import android.os.Looper
+          import android.provider.Settings
           import android.webkit.CookieManager
           import android.webkit.DownloadListener
           import android.webkit.PermissionRequest
@@ -310,20 +311,38 @@ jobs:
               private var webView: WebView? = null
               private var filePathCallback: ValueCallback<Array<Uri>>? = null
               private var pendingPermissionRequest: PermissionRequest? = null
+              private var pendingDownload: (() -> Unit)? = null
+
+              // Follows the system auto-rotate toggle live.
+              private val rotationObserver =
+                  object : ContentObserver(Handler(Looper.getMainLooper())) {
+                      override fun onChange(selfChange: Boolean) {
+                          applyRotationPolicy()
+                      }
+                  }
 
               companion object {
                   private const val WEBSITE_URL = "https://app.yaran.info"
                   private const val WEBSITE_HOST = "app.yaran.info"
                   private const val FILE_CHOOSER_REQUEST_CODE = 1001
-                  private const val PERMISSION_REQUEST_CODE = 2001
-                  private const val CAMERA_FROM_WEBVIEW_REQUEST_CODE = 2002
+                  private const val WEB_PERMISSION_REQUEST_CODE = 2002
+                  private const val STORAGE_REQUEST_CODE = 2003
               }
 
-              @SuppressLint("SetJavaScriptEnabled")
               override fun onCreate(savedInstanceState: Bundle?) {
                   super.onCreate(savedInstanceState)
 
+                  applyRotationPolicy()
                   setContentView(R.layout.activity_main)
+
+                  try {
+                      contentResolver.registerContentObserver(
+                          Settings.System.getUriFor(Settings.System.ACCELEROMETER_ROTATION),
+                          false,
+                          rotationObserver
+                      )
+                  } catch (_: Exception) {
+                  }
 
                   webView = findViewById(R.id.webView)
                   setupWebView()
@@ -333,6 +352,52 @@ jobs:
                       webView?.loadUrl(WEBSITE_URL)
                   } else {
                       webView?.restoreState(savedInstanceState)
+                  }
+              }
+
+              override fun onResume() {
+                  super.onResume()
+                  applyRotationPolicy()
+              }
+
+              private fun applyRotationPolicy() {
+                  val autoRotate = try {
+                      Settings.System.getInt(
+                          contentResolver,
+                          Settings.System.ACCELEROMETER_ROTATION,
+                          1
+                      ) == 1
+                  } catch (_: Exception) {
+                      true
+                  }
+
+                  val target = if (autoRotate) {
+                      ActivityInfo.SCREEN_ORIENTATION_USER
+                  } else {
+                      ActivityInfo.SCREEN_ORIENTATION_LOCKED
+                  }
+
+                  if (requestedOrientation != target) {
+                      requestedOrientation = target
+                  }
+              }
+
+              private fun hasPermission(permission: String): Boolean =
+                  ContextCompat.checkSelfPermission(this, permission) ==
+                      PackageManager.PERMISSION_GRANTED
+
+              private fun handleScheme(uri: Uri): Boolean {
+                  return when (uri.scheme?.lowercase()) {
+                      null -> false
+                      "http", "https" -> false
+                      "tel", "mailto", "sms", "geo" -> {
+                          try {
+                              startActivity(Intent(Intent.ACTION_VIEW, uri))
+                          } catch (_: Exception) {
+                          }
+                          true
+                      }
+                      else -> true
                   }
               }
 
@@ -350,24 +415,19 @@ jobs:
                   settings.blockNetworkLoads = false
                   settings.useWideViewPort = true
                   settings.loadWithOverviewMode = true
+                  settings.textZoom = 100
                   settings.cacheMode = WebSettings.LOAD_DEFAULT
 
-                  // Keep local/file access restricted.
                   settings.allowFileAccess = false
                   settings.allowContentAccess = true
                   settings.allowFileAccessFromFileURLs = false
                   settings.allowUniversalAccessFromFileURLs = false
 
-                  // Compatibility mode lets legacy HTTP image/CDN subresources
-                  // render inside the HTTPS site.
                   settings.mixedContentMode = WebSettings.MIXED_CONTENT_COMPATIBILITY_MODE
-
                   settings.mediaPlaybackRequiresUserGesture = false
 
                   CookieManager.getInstance().setAcceptCookie(true)
                   CookieManager.getInstance().setAcceptThirdPartyCookies(wv, true)
-
-                  wv.setLayerType(View.LAYER_TYPE_HARDWARE, null)
 
                   wv.webViewClient = object : WebViewClient() {
 
@@ -376,42 +436,17 @@ jobs:
                           request: WebResourceRequest?
                       ): Boolean {
                           val uri = request?.url ?: return false
-                          val scheme = uri.scheme?.lowercase() ?: return false
-
-                          return when (scheme) {
-                              "http", "https" -> false
-                              "tel", "mailto", "sms", "geo" -> {
-                                  try {
-                                      startActivity(Intent(Intent.ACTION_VIEW, uri))
-                                  } catch (_: Exception) {
-                                  }
-                                  true
-                              }
-                              else -> true
-                          }
+                          return handleScheme(uri)
                       }
 
-                      @Suppress("DEPRECATION")
+                      // Required for Android 6 (API 23), which calls this overload.
+                      @Suppress("DEPRECATION", "OVERRIDE_DEPRECATION")
                       override fun shouldOverrideUrlLoading(
                           view: WebView?,
                           url: String?
                       ): Boolean {
                           if (url.isNullOrBlank()) return false
-
-                          val uri = Uri.parse(url)
-                          val scheme = uri.scheme?.lowercase() ?: return false
-
-                          return when (scheme) {
-                              "http", "https" -> false
-                              "tel", "mailto", "sms", "geo" -> {
-                                  try {
-                                      startActivity(Intent(Intent.ACTION_VIEW, uri))
-                                  } catch (_: Exception) {
-                                  }
-                                  true
-                              }
-                              else -> true
-                          }
+                          return handleScheme(Uri.parse(url))
                       }
 
                       override fun onReceivedSslError(
@@ -446,7 +481,6 @@ jobs:
                           request: WebResourceRequest?,
                           errorResponse: WebResourceResponse?
                       ) {
-                          // Do not interrupt image/resource loading with a Toast.
                       }
                   }
 
@@ -455,40 +489,44 @@ jobs:
                       override fun onPermissionRequest(request: PermissionRequest?) {
                           request ?: return
 
-                          val originHost = try {
-                              Uri.parse(request.origin.toString()).host
-                          } catch (_: Exception) {
-                              null
-                          }
-
-                          if (originHost != WEBSITE_HOST) {
+                          if (request.origin?.host != WEBSITE_HOST) {
                               request.deny()
                               return
                           }
 
-                          val requested = request.resources.toSet()
-
-                          if (
-                              PermissionRequest.RESOURCE_VIDEO_CAPTURE in requested ||
-                              PermissionRequest.RESOURCE_AUDIO_CAPTURE in requested
-                          ) {
-                              if (
-                                  ContextCompat.checkSelfPermission(
-                                      this@MainActivity,
+                          val needed = request.resources.mapNotNull { res ->
+                              when (res) {
+                                  PermissionRequest.RESOURCE_VIDEO_CAPTURE ->
                                       Manifest.permission.CAMERA
-                                  ) == PackageManager.PERMISSION_GRANTED
-                              ) {
-                                  request.grant(request.resources)
-                              } else {
-                                  pendingPermissionRequest = request
-                                  ActivityCompat.requestPermissions(
-                                      this@MainActivity,
-                                      arrayOf(Manifest.permission.CAMERA),
-                                      CAMERA_FROM_WEBVIEW_REQUEST_CODE
-                                  )
+                                  PermissionRequest.RESOURCE_AUDIO_CAPTURE ->
+                                      Manifest.permission.RECORD_AUDIO
+                                  else -> null
                               }
-                          } else {
+                          }.distinct()
+
+                          if (needed.isEmpty()) {
                               request.deny()
+                              return
+                          }
+
+                          val missing = needed.filter { !hasPermission(it) }
+
+                          if (missing.isEmpty()) {
+                              request.grant(request.resources)
+                          } else {
+                              pendingPermissionRequest?.deny()
+                              pendingPermissionRequest = request
+                              ActivityCompat.requestPermissions(
+                                  this@MainActivity,
+                                  missing.toTypedArray(),
+                                  WEB_PERMISSION_REQUEST_CODE
+                              )
+                          }
+                      }
+
+                      override fun onPermissionRequestCanceled(request: PermissionRequest?) {
+                          if (request != null && request == pendingPermissionRequest) {
+                              pendingPermissionRequest = null
                           }
                       }
 
@@ -529,65 +567,75 @@ jobs:
 
                   wv.setDownloadListener(
                       DownloadListener { url, userAgent, contentDisposition, mimeType, _ ->
-                          try {
-                              val uri = Uri.parse(url)
-                              val cookies = CookieManager.getInstance().getCookie(url)
-                              val fileName = URLUtil.guessFileName(
-                                  url,
-                                  contentDisposition,
-                                  mimeType
+                          val start = {
+                              startDownload(url, userAgent, contentDisposition, mimeType)
+                          }
+
+                          // Android 6-9 needs a runtime storage permission for Downloads.
+                          if (
+                              Build.VERSION.SDK_INT <= Build.VERSION_CODES.P &&
+                              !hasPermission(Manifest.permission.WRITE_EXTERNAL_STORAGE)
+                          ) {
+                              pendingDownload = start
+                              ActivityCompat.requestPermissions(
+                                  this,
+                                  arrayOf(Manifest.permission.WRITE_EXTERNAL_STORAGE),
+                                  STORAGE_REQUEST_CODE
                               )
-
-                              val request = DownloadManager.Request(uri).apply {
-                                  setTitle(fileName)
-                                  setDescription("Downloading...")
-                                  if (!mimeType.isNullOrBlank()) {
-                                      setMimeType(mimeType)
-                                  }
-                                  setNotificationVisibility(
-                                      DownloadManager.Request.VISIBILITY_VISIBLE_NOTIFY_COMPLETED
-                                  )
-                                  setAllowedOverRoaming(true)
-
-                                  if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.N) {
-                                      setAllowedOverMetered(true)
-                                  }
-
-                                  if (!userAgent.isNullOrBlank()) {
-                                      addRequestHeader("User-Agent", userAgent)
-                                  }
-
-                                  if (!cookies.isNullOrBlank()) {
-                                      addRequestHeader("Cookie", cookies)
-                                  }
-
-                                  addRequestHeader("Referer", WEBSITE_URL)
-                                  setDestinationInExternalPublicDir(
-                                      Environment.DIRECTORY_DOWNLOADS,
-                                      fileName
-                                  )
-                              }
-
-                              val dm =
-                                  getSystemService(Context.DOWNLOAD_SERVICE)
-                                      as DownloadManager
-
-                              dm.enqueue(request)
-
-                              Toast.makeText(
-                                  this,
-                                  "Download started: $fileName",
-                                  Toast.LENGTH_SHORT
-                              ).show()
-                          } catch (_: Exception) {
-                              Toast.makeText(
-                                  this,
-                                  "Download error",
-                                  Toast.LENGTH_SHORT
-                              ).show()
+                          } else {
+                              start()
                           }
                       }
                   )
+              }
+
+              private fun startDownload(
+                  url: String,
+                  userAgent: String?,
+                  contentDisposition: String?,
+                  mimeType: String?
+              ) {
+                  try {
+                      val cookies = CookieManager.getInstance().getCookie(url)
+                      val fileName = URLUtil.guessFileName(url, contentDisposition, mimeType)
+
+                      val request = DownloadManager.Request(Uri.parse(url)).apply {
+                          setTitle(fileName)
+                          setDescription("Downloading...")
+                          if (!mimeType.isNullOrBlank()) {
+                              setMimeType(mimeType)
+                          }
+                          setNotificationVisibility(
+                              DownloadManager.Request.VISIBILITY_VISIBLE_NOTIFY_COMPLETED
+                          )
+                          setAllowedOverRoaming(true)
+                          setAllowedOverMetered(true)
+
+                          if (!userAgent.isNullOrBlank()) {
+                              addRequestHeader("User-Agent", userAgent)
+                          }
+                          if (!cookies.isNullOrBlank()) {
+                              addRequestHeader("Cookie", cookies)
+                          }
+                          addRequestHeader("Referer", WEBSITE_URL)
+
+                          setDestinationInExternalPublicDir(
+                              Environment.DIRECTORY_DOWNLOADS,
+                              fileName
+                          )
+                      }
+
+                      val dm = getSystemService(Context.DOWNLOAD_SERVICE) as DownloadManager
+                      dm.enqueue(request)
+
+                      Toast.makeText(
+                          this,
+                          "Download started: $fileName",
+                          Toast.LENGTH_SHORT
+                      ).show()
+                  } catch (_: Exception) {
+                      Toast.makeText(this, "Download error", Toast.LENGTH_SHORT).show()
+                  }
               }
 
               private fun setupBackNavigation() {
@@ -613,31 +661,48 @@ jobs:
                   permissions: Array<out String>,
                   grantResults: IntArray
               ) {
-                  super.onRequestPermissionsResult(
-                      requestCode,
-                      permissions,
-                      grantResults
-                  )
+                  super.onRequestPermissionsResult(requestCode, permissions, grantResults)
 
-                  if (requestCode != CAMERA_FROM_WEBVIEW_REQUEST_CODE) {
-                      return
-                  }
+                  when (requestCode) {
+                      WEB_PERMISSION_REQUEST_CODE -> {
+                          val request = pendingPermissionRequest
+                          pendingPermissionRequest = null
+                          request ?: return
 
-                  val request = pendingPermissionRequest
-                  pendingPermissionRequest = null
+                          val allowed = request.resources.filter { res ->
+                              when (res) {
+                                  PermissionRequest.RESOURCE_VIDEO_CAPTURE ->
+                                      hasPermission(Manifest.permission.CAMERA)
+                                  PermissionRequest.RESOURCE_AUDIO_CAPTURE ->
+                                      hasPermission(Manifest.permission.RECORD_AUDIO)
+                                  else -> false
+                              }
+                          }
 
-                  if (request == null) {
-                      return
-                  }
+                          if (allowed.isEmpty()) {
+                              request.deny()
+                          } else {
+                              request.grant(allowed.toTypedArray())
+                          }
+                      }
 
-                  val granted =
-                      grantResults.isNotEmpty() &&
-                          grantResults[0] == PackageManager.PERMISSION_GRANTED
+                      STORAGE_REQUEST_CODE -> {
+                          val action = pendingDownload
+                          pendingDownload = null
 
-                  if (granted) {
-                      request.grant(request.resources)
-                  } else {
-                      request.deny()
+                          if (
+                              grantResults.isNotEmpty() &&
+                              grantResults[0] == PackageManager.PERMISSION_GRANTED
+                          ) {
+                              action?.invoke()
+                          } else {
+                              Toast.makeText(
+                                  this,
+                                  "Storage permission denied",
+                                  Toast.LENGTH_SHORT
+                              ).show()
+                          }
+                      }
                   }
               }
 
@@ -689,8 +754,14 @@ jobs:
               }
 
               override fun onDestroy() {
+                  try {
+                      contentResolver.unregisterContentObserver(rotationObserver)
+                  } catch (_: Exception) {
+                  }
+
                   pendingPermissionRequest?.deny()
                   pendingPermissionRequest = null
+                  pendingDownload = null
 
                   filePathCallback?.onReceiveValue(null)
                   filePathCallback = null
@@ -778,8 +849,8 @@ jobs:
                   applicationId 'com.mohammadkhxm.browser'
                   minSdk 23
                   targetSdk 34
-                  versionCode 2
-                  versionName '1.1'
+                  versionCode 3
+                  versionName '1.2'
                   vectorDrawables.useSupportLibrary = true
               }
 
@@ -815,9 +886,10 @@ jobs:
               buildTypes {
                   release {
                       signingConfig signingConfigs.release
-                      minifyEnabled false
+                      minifyEnabled true
                       shrinkResources false
                       debuggable false
+                      proguardFiles getDefaultProguardFile('proguard-android-optimize.txt')
                   }
               }
 
@@ -886,7 +958,7 @@ jobs:
           # gradle.properties
           # ===============================================================
           cat > gradle.properties <<'EOF'
-          org.gradle.jvmargs=-Xmx3072m -Dfile.encoding=UTF-8
+          org.gradle.jvmargs=-Xmx3072m -XX:+UseParallelGC -Dfile.encoding=UTF-8
           org.gradle.parallel=true
           org.gradle.caching=true
           android.useAndroidX=true
@@ -908,7 +980,7 @@ jobs:
           zipStorePath=wrapper/dists
           EOF
 
-          curl -fsSL \
+          curl -fsSL --retry 3 \
             "https://raw.githubusercontent.com/gradle/gradle/v8.7.0/gradle/wrapper/gradle-wrapper.jar" \
             -o gradle/wrapper/gradle-wrapper.jar
 
@@ -925,7 +997,6 @@ jobs:
           chmod +x gradlew
 
           echo "Android project generated successfully."
-          echo "Repository image copied to app/src/main/res/drawable/yaraniha.png"
 
       - name: Preflight Gradle configuration
         shell: bash
@@ -948,12 +1019,22 @@ jobs:
 
       - name: Verify APK alignment and signatures
         shell: bash
+        env:
+          PINNED_CERT_SHA256: ${{ secrets.ANDROID_CERT_SHA256 }}
         run: |
           set -euo pipefail
 
           APK_DIR="app/build/outputs/apk/release"
           APKSIGNER="$ANDROID_HOME/build-tools/34.0.0/apksigner"
           ZIPALIGN="$ANDROID_HOME/build-tools/34.0.0/zipalign"
+
+          KS_FP="${KEYSTORE_CERT_SHA256:-}"
+          PIN="$(printf '%s' "${PINNED_CERT_SHA256:-}" | tr -d ':[:space:]' | tr 'A-F' 'a-f')"
+
+          if [ -z "$KS_FP" ]; then
+            echo "ERROR: keystore fingerprint was not captured."
+            exit 1
+          fi
 
           mapfile -t APKS < <(find "$APK_DIR" -maxdepth 1 -type f -name "*.apk" | sort)
 
@@ -962,88 +1043,55 @@ jobs:
             exit 1
           fi
 
-          echo "APKs:"
           printf ' - %s\n' "${APKS[@]}"
 
           for apk in "${APKS[@]}"; do
+            name="$(basename "$apk")"
             echo
-            echo "=============================================================="
-            echo "VERIFY: $(basename "$apk")"
-            echo "=============================================================="
+            echo "=== VERIFY: $name ==="
 
-            "$ZIPALIGN" -c -p -v 4 "$apk"
+            "$ZIPALIGN" -c -p 4 "$apk"
 
-            VERIFY_OUTPUT="$("$APKSIGNER" verify --verbose --print-certs "$apk" 2>&1)"
-            printf '%s\n' "$VERIFY_OUTPUT"
+            # --min-sdk-version 23 makes apksigner require a valid v1 signature,
+            # which is the only scheme Android 6 understands.
+            OUT="$("$APKSIGNER" verify --verbose --print-certs --min-sdk-version 23 "$apk" 2>&1)"
+            printf '%s\n' "$OUT"
 
-            grep -q "Verified using v2 scheme (APK Signature Scheme v2): true" \
-              <<< "$VERIFY_OUTPUT" || {
-                echo "ERROR: v2 signature verification failed for $(basename "$apk")."
+            for scheme in \
+              "v1 scheme (JAR signing)" \
+              "v2 scheme (APK Signature Scheme v2)" \
+              "v3 scheme (APK Signature Scheme v3)"; do
+              grep -qF "Verified using $scheme: true" <<< "$OUT" || {
+                echo "ERROR: $scheme verification failed for $name."
                 exit 1
               }
+            done
 
-            grep -q "Verified using v3 scheme (APK Signature Scheme v3): true" \
-              <<< "$VERIFY_OUTPUT" || {
-                echo "ERROR: v3 signature verification failed for $(basename "$apk")."
-                exit 1
-              }
+            grep -q "Number of signers: 1" <<< "$OUT" || {
+              echo "ERROR: $name must have exactly one signer."
+              exit 1
+            }
 
-            grep -q "Number of signers: 1" \
-              <<< "$VERIFY_OUTPUT" || {
-                echo "ERROR: APK must have exactly one signer."
-                exit 1
-              }
+            DIGEST="$(grep -m1 -F 'certificate SHA-256 digest:' <<< "$OUT" \
+              | awk '{print $NF}' | tr 'A-F' 'a-f' || true)"
 
-            echo "Signature and alignment: OK"
+            if [ "$DIGEST" != "$KS_FP" ]; then
+              echo "ERROR: $name is not signed with the expected keystore."
+              echo "  expected: $KS_FP"
+              echo "  actual:   $DIGEST"
+              exit 1
+            fi
+
+            if [ -n "$PIN" ] && [ "$DIGEST" != "$PIN" ]; then
+              echo "ERROR: $name certificate does not match secret ANDROID_CERT_SHA256."
+              exit 1
+            fi
+
+            echo "Signature, alignment and certificate: OK"
           done
 
           echo
-          echo "All APK signatures verified successfully."
-
-          KEYSTORE_CERT_SHA256="$(
-            keytool -list -v \
-              -keystore "$GITHUB_WORKSPACE/yaraniha.keystore" \
-              -storepass "$KEYSTORE_PASSWORD" \
-              -alias "$KEY_ALIAS" |
-            awk -F': ' '
-              /Certificate fingerprints:/ { in_fp=1; next }
-              in_fp && /SHA256:/ { print $2; exit }
-            '
-          )"
-
-          if [ -z "$KEYSTORE_CERT_SHA256" ]; then
-            echo "ERROR: Could not read SHA-256 certificate fingerprint from keystore."
-            exit 1
-          fi
-
-          KEYSTORE_CERT_SHA256="$(printf '%s' "$KEYSTORE_CERT_SHA256" | tr -d ':' | tr '[:lower:]' '[:upper:]')"
-          echo "Expected signing certificate SHA-256: $KEYSTORE_CERT_SHA256"
-
-          for apk in "${APKS[@]}"; do
-            VERIFY_OUTPUT="$("$APKSIGNER" verify --verbose --print-certs "$apk" 2>&1)"
-            APK_CERT_SHA256="$(
-              printf '%s\n' "$VERIFY_OUTPUT" |
-              awk -F': ' '/Signer #1 certificate SHA-256 digest:/ { print $2; exit }'
-            )"
-
-            if [ -z "$APK_CERT_SHA256" ]; then
-              echo "ERROR: Could not read APK signer SHA-256 fingerprint from $(basename "$apk")."
-              exit 1
-            fi
-
-            APK_CERT_SHA256="$(printf '%s' "$APK_CERT_SHA256" | tr -d ':' | tr '[:lower:]' '[:upper:]')"
-
-            if [ "$APK_CERT_SHA256" != "$KEYSTORE_CERT_SHA256" ]; then
-              echo "ERROR: Signing certificate mismatch for $(basename "$apk")."
-              echo "Expected: $KEYSTORE_CERT_SHA256"
-              echo "Actual:   $APK_CERT_SHA256"
-              exit 1
-            fi
-
-            echo "Certificate match: OK ($(basename "$apk"))"
-          done
-
-          echo "Signing certificate identity verified for every APK."
+          echo "All APKs are signed with the same fixed certificate: $KS_FP"
 
       - name: Verify release APK package contents
         shell: bash
@@ -1058,31 +1106,26 @@ jobs:
             exit 1
           fi
 
-          echo "Checking that drawable/yaraniha is present in the compiled resource table..."
-
           for apk in "$APK_DIR"/*.apk; do
-            echo "--- $(basename "$apk") ---"
+            name="$(basename "$apk")"
+            echo "--- $name ---"
 
-            # Release builds shorten resource file paths inside the APK
-            # (e.g. res/drawable/yaraniha.png -> res/-B.png), so we cannot
-            # grep the zip listing for the original path. Instead we ask
-            # aapt2 to read the compiled resource table (resources.arsc)
-            # and confirm the logical entry exists.
-            #
-            # Note: we deliberately do NOT grep AndroidManifest.xml for
-            # "drawable/yaraniha" -- the compiled manifest stores a numeric
-            # resource ID (e.g. 0x7f080000), not the string form.
-            "$AAPT2" dump resources "$apk" \
-              | grep -q "drawable/yaraniha" || {
-                echo "ERROR: drawable/yaraniha is missing from $(basename "$apk")"
+            BADGING="$("$AAPT2" dump badging "$apk")"
+
+            need() {
+              grep -Eq "$1" <<< "$BADGING" || {
+                echo "ERROR: $2 ($name)"
                 exit 1
               }
+            }
 
-            echo "Drawable resource present."
+            need "^package: name='com\.mohammadkhxm\.browser'" "wrong package name"
+            need "^sdkVersion:'23'" "minSdkVersion is not 23 (Android 6)"
+            need "^application: .*icon='res/" "launcher icon missing"
+            need "launchable-activity: name='com\.mohammadkhxm\.browser\.MainActivity'" "launcher activity missing"
+
+            echo "Package metadata OK"
           done
-
-          echo
-          echo "Resource check passed for all APKs."
 
       - name: Verify native ABI libraries per APK
         shell: bash
@@ -1091,31 +1134,17 @@ jobs:
 
           APK_DIR="app/build/outputs/apk/release"
 
-          echo "Checking that each split APK contains the expected ABI library..."
-
           for apk in "$APK_DIR"/*.apk; do
             name="$(basename "$apk")"
             echo "--- $name ---"
 
             case "$name" in
-              *arm64-v8a*)
-                abis=("arm64-v8a")
-                ;;
-              *armeabi-v7a*)
-                abis=("armeabi-v7a")
-                ;;
-              *x86_64*)
-                abis=("x86_64")
-                ;;
-              *x86*)
-                abis=("x86")
-                ;;
-              *universal*)
-                abis=("arm64-v8a" "armeabi-v7a" "x86" "x86_64")
-                ;;
-              *)
-                abis=()
-                ;;
+              *arm64-v8a*)   abis=("arm64-v8a") ;;
+              *armeabi-v7a*) abis=("armeabi-v7a") ;;
+              *x86_64*)      abis=("x86_64") ;;
+              *x86*)         abis=("x86") ;;
+              *universal*)   abis=("arm64-v8a" "armeabi-v7a" "x86" "x86_64") ;;
+              *)             abis=() ;;
             esac
 
             if [ "${#abis[@]}" -eq 0 ]; then
@@ -1123,8 +1152,10 @@ jobs:
               continue
             fi
 
+            LISTING="$(unzip -l "$apk")"
+
             for abi in "${abis[@]}"; do
-              unzip -l "$apk" | grep -q "lib/$abi/libyaraniha_abi.so" || {
+              grep -q "lib/$abi/libyaraniha_abi.so" <<< "$LISTING" || {
                 echo "ERROR: lib/$abi/libyaraniha_abi.so missing from $name"
                 exit 1
               }
@@ -1132,7 +1163,6 @@ jobs:
             done
           done
 
-          echo
           echo "ABI library check passed."
 
       - name: Publish APK artifacts
