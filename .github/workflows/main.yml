@@ -169,6 +169,7 @@ jobs:
           mkdir -p app/src/main/jniLibs/arm64-v8a
           mkdir -p app/src/main/jniLibs/armeabi-v7a
           mkdir -p app/src/main/jniLibs/x86
+          mkdir -p app/src/main/jniLibs/x86_64
 
           cat > /tmp/yaraniha_abi_marker.c <<'EOF'
           __attribute__((visibility("default")))
@@ -193,9 +194,15 @@ jobs:
             /tmp/yaraniha_abi_marker.c \
             -o app/src/main/jniLibs/x86/libyaraniha_abi.so
 
+          "$TOOLCHAIN/x86_64-linux-android21-clang" \
+            -shared -fPIC -O2 \
+            /tmp/yaraniha_abi_marker.c \
+            -o app/src/main/jniLibs/x86_64/libyaraniha_abi.so
+
           file app/src/main/jniLibs/arm64-v8a/libyaraniha_abi.so
           file app/src/main/jniLibs/armeabi-v7a/libyaraniha_abi.so
           file app/src/main/jniLibs/x86/libyaraniha_abi.so
+          file app/src/main/jniLibs/x86_64/libyaraniha_abi.so
 
           # ===============================================================
           # AndroidManifest.xml
@@ -207,8 +214,6 @@ jobs:
               <uses-permission android:name="android.permission.INTERNET" />
               <uses-permission android:name="android.permission.ACCESS_NETWORK_STATE" />
               <uses-permission android:name="android.permission.CAMERA" />
-              <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
-
               <uses-permission
                   android:name="android.permission.WRITE_EXTERNAL_STORAGE"
                   android:maxSdkVersion="28" />
@@ -233,6 +238,7 @@ jobs:
 
                   <activity
                       android:name=".MainActivity"
+                      android:screenOrientation="portrait"
                       android:configChanges="orientation|screenSize|screenLayout|keyboardHidden|uiMode"
                       android:exported="true"
                       android:hardwareAccelerated="true"
@@ -781,7 +787,7 @@ jobs:
                   abi {
                       enable true
                       reset()
-                      include 'arm64-v8a', 'armeabi-v7a', 'x86'
+                      include 'arm64-v8a', 'armeabi-v7a', 'x86', 'x86_64'
                       universalApk true
                   }
               }
@@ -994,6 +1000,51 @@ jobs:
           echo
           echo "All APK signatures verified successfully."
 
+          KEYSTORE_CERT_SHA256="$(
+            keytool -list -v \
+              -keystore "$GITHUB_WORKSPACE/yaraniha.keystore" \
+              -storepass "$KEYSTORE_PASSWORD" \
+              -alias "$KEY_ALIAS" |
+            awk -F': ' '
+              /Certificate fingerprints:/ { in_fp=1; next }
+              in_fp && /SHA256:/ { print $2; exit }
+            '
+          )"
+
+          if [ -z "$KEYSTORE_CERT_SHA256" ]; then
+            echo "ERROR: Could not read SHA-256 certificate fingerprint from keystore."
+            exit 1
+          fi
+
+          KEYSTORE_CERT_SHA256="$(printf '%s' "$KEYSTORE_CERT_SHA256" | tr -d ':' | tr '[:lower:]' '[:upper:]')"
+          echo "Expected signing certificate SHA-256: $KEYSTORE_CERT_SHA256"
+
+          for apk in "${APKS[@]}"; do
+            VERIFY_OUTPUT="$("$APKSIGNER" verify --verbose --print-certs "$apk" 2>&1)"
+            APK_CERT_SHA256="$(
+              printf '%s\n' "$VERIFY_OUTPUT" |
+              awk -F': ' '/Signer #1 certificate SHA-256 digest:/ { print $2; exit }'
+            )"
+
+            if [ -z "$APK_CERT_SHA256" ]; then
+              echo "ERROR: Could not read APK signer SHA-256 fingerprint from $(basename "$apk")."
+              exit 1
+            fi
+
+            APK_CERT_SHA256="$(printf '%s' "$APK_CERT_SHA256" | tr -d ':' | tr '[:lower:]' '[:upper:]')"
+
+            if [ "$APK_CERT_SHA256" != "$KEYSTORE_CERT_SHA256" ]; then
+              echo "ERROR: Signing certificate mismatch for $(basename "$apk")."
+              echo "Expected: $KEYSTORE_CERT_SHA256"
+              echo "Actual:   $APK_CERT_SHA256"
+              exit 1
+            fi
+
+            echo "Certificate match: OK ($(basename "$apk"))"
+          done
+
+          echo "Signing certificate identity verified for every APK."
+
       - name: Verify release APK package contents
         shell: bash
         run: |
@@ -1053,11 +1104,14 @@ jobs:
               *armeabi-v7a*)
                 abis=("armeabi-v7a")
                 ;;
+              *x86_64*)
+                abis=("x86_64")
+                ;;
               *x86*)
                 abis=("x86")
                 ;;
               *universal*)
-                abis=("arm64-v8a" "armeabi-v7a" "x86")
+                abis=("arm64-v8a" "armeabi-v7a" "x86" "x86_64")
                 ;;
               *)
                 abis=()
